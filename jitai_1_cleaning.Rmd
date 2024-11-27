@@ -1,0 +1,448 @@
+---
+title: "JITAI Meta-Analysis"
+subtitle: "1. Data Cleaning"
+author: "Constantin Yves Plessen"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: show
+    highlight: pygment
+    keep_md: no
+    theme: lumen
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(janitor)
+library(tidyverse)
+library(metapsyTools)
+library(esc)
+library(metafor)
+library(skimr)
+```
+
+# Setup
+
+## Load data
+
+```{r}
+jitai_df <- readxl::read_excel("data/raw/Daten von Yves Github_ps_cs_V2_cyp.xlsx") %>% 
+  clean_names() %>% 
+  select(es_id, study_id, study, 
+       outcome_measure, intervention_group, control_group, sample, device,  sr_clinician, time, 
+       post_m_ig:change_n_cg,
+       everything(),
+       -c(es, se, yi, vi)) %>% 
+  glimpse() 
+```
+
+## Calculate effect sizes
+
+### Transform se to sd
+https://handbook-5-1.cochrane.org/chapter_7/7_7_3_2_obtaining_standard_deviations_from_standard_errors_and.htm 
+```{r}
+jitai_df_clean <- jitai_df %>% 
+  mutate_at(vars(post_m_ig:change_n_cg), as.numeric) %>% 
+  mutate(post_sd_ig = ifelse(!is.na(post_se_ig), post_se_ig * sqrt(post_n_ig), post_sd_ig),
+         post_sd_cg = ifelse(!is.na(post_se_cg), post_se_cg * sqrt(post_n_cg), post_sd_cg),
+         
+         baseline_sd_ig = ifelse(!is.na(baseline_se_ig), baseline_se_ig * sqrt(baseline_n_ig), baseline_sd_ig),
+         baseline_sd_cg = ifelse(!is.na(baseline_se_cg), baseline_se_cg * sqrt(baseline_n_cg), baseline_sd_cg))  %>% 
+  
+  mutate(change_sd_ig = sqrt(change_n_ig) * (change_ig_ci_upper - change_ig_ci_lower) /3.92,
+         change_sd_cg = sqrt(change_n_cg) * (change_cg_ci_upper - change_cg_ci_lower) /3.92,
+  )
+```
+
+
+### Calculate Hedges g from means, sd, and n
+```{r}
+meanSD = function(x, ...){
+  x %>%
+    purrr::pmap_dfr(function(post_m_ig,
+                             post_sd_ig,
+                             post_n_ig,
+                             post_m_cg,
+                             post_sd_cg,
+                             post_n_cg, ...)
+    {esc::esc_mean_sd(post_m_ig,
+                      post_sd_ig,
+                      post_n_ig,
+                      post_m_cg,
+                      post_sd_cg,
+                      post_n_cg,
+                      es.type = "g") %>%
+        as.data.frame()  %>% dplyr::select(es, se) %>%
+        suppressWarnings()})
+}
+
+jitai_es_meanSD <- jitai_df_clean %>% 
+  meanSD()
+```
+
+### Calculate Hedges g from change scores
+```{r}
+changeES = function(x, ...){
+  x %>%
+    purrr::pmap_dfr(function(change_m_ig, change_m_cg, change_sd_ig,
+                             change_sd_cg, change_n_ig, change_n_cg, ...)
+    {esc::esc_mean_sd(change_m_ig, change_sd_ig, change_n_ig,
+                      change_m_cg, change_sd_cg, change_n_cg, es.type = "g") %>%
+        as.data.frame() %>% dplyr::select(es, se) %>%
+        suppressWarnings()})
+  }
+
+jitai_es_changeES <- jitai_df_clean %>% 
+  changeES()
+```
+
+<br>
+
+### Bind effect size data to data seta
+```{r}
+jitai_df_with_es <- bind_cols(jitai_df_clean, coalesce(jitai_es_meanSD, jitai_es_changeES)) %>% 
+  mutate(es = es * -1) # positive g indicates treatment favors ig
+
+jitai_df_with_es %>% 
+  select(study, es, outcome_type, post_m_ig, post_m_cg, change_m_ig, change_m_cg) 
+```
+
+## Load ROB2
+
+```{r}
+jitai_rob <- readxl::read_excel("data/raw/jitai-rob-templat_chs_fv_cyp.xlsx", skip = 1) %>% 
+  clean_names() %>% 
+  glimpse()
+```
+
+```{r}
+jitai_rob_renamed <- jitai_rob %>%
+  select(id_study = study,
+         rob_1_1                    =  x1_1_sg,
+         rob_1_1_descr              =  x1_1_description,
+         rob_1_2                    =  x1_2_ac,
+         rob_1_2_descr              =  x1_2_description,
+         rob_1_3                    =  x1_3_bl_imbalance,
+         rob_1_3_descr              =  x1_3_description,
+         domain_1_rating            =  domain_1_rating,
+         rob_2_1                    =  x2_1_participants_aware_allocation,
+         rob_2_2                    =  x2_2_personnel_aware_allocation,
+         rob_2_3                    =  x2_3_deviations_trial,
+         rob_2_3_descr              =  x2_3_description,
+         rob_2_4                    =  x2_4_affected_outcome,
+         rob_2_4_descr              =  x2_4_description,
+         rob_2_5                    =  x2_5_deviations_balanced,
+         rob_2_5_descr              =  x2_5_description,
+         domain_2_part_1_rating     =  rating_2_1,
+         rob_2_6                    =  x2_6_itt_analysis,
+         rob_2_6_descr              =  x2_6_description,
+         rob_2_7                    =  x2_7_impact,
+         rob_2_7_descr              =  x2_7_description,
+         domain_2_part_2_rating     =  rating_2_2,
+         domain_2_rating            =  domain_2_rating,
+         rob_3_1                    =  x3_1_outcome_available,
+         rob_3_1_over_cutoff = rob_3_1_over_cutoff,
+         attrition                  =  attrition,
+         rob_3_2                    =  x3_2_result_unbiased,
+         rob_3_2_descr              =  x3_2_description,
+         rob_3_4                    =  x3_4_missingness_depends_on_true_value,
+         rob_3_4_descr              =  x3_4_description,
+         domain_3_rating            =  rating_3,
+         rob_4_1                    =  x4_1_outcome_inappropriate,
+         rob_4_2                    =  x4_2_measurement_group_differences,
+         rob_4_3_sr                 =  x4_3_assessors_aware_self_reported,
+         rob_4_3_cr                 =  x4_3_assessors_aware_clinician_rated,
+         rob_4_3_descr              =  description_4_3,
+         domain_4_rating_sr         =  domain_4_rating_self_reported,
+         domain_4_rating_cr         =  domain_4_rating_clinician_rated,
+         rob_5_registered_prospective= registered_prospective,
+         registration_number,
+         rob_5_2                     = rating_dicrepancies,
+         rob_5_discrepancies         = discrepancies,
+         domain_5_rating             = domain_5_rating,
+         overall_score,
+         everything()) %>% 
+  
+  mutate(rob_2_4 = "NI",
+         rob_2_5 = "NI")
+```
+
+### Apply ROB2 Algorithm 
+```{r}
+jitai_rob_calculated <- jitai_rob_renamed %>% 
+  mutate(
+    domain_1_rating_algorithm = case_when(
+      rob_1_2 %in% c("Y", "PY") &  rob_1_1 %in% c("Y", "PY", "NI") &  rob_1_3 %in% c("N", "PN", "NI")  ~ "LR",
+      rob_1_2 == "NI" &  rob_1_3 %in% c("N", "PN", "NI")   ~ "SC",
+      rob_1_2  %in% c("Y", "PY")  & rob_1_1  %in% c("N", "PN")   ~ "SC",
+      rob_1_2  %in% c("Y", "PY") &  rob_1_1 %in% c("Y", "PY", "NI") & rob_1_3 %in% c("Y", "PY")   ~ "SC",
+      rob_1_2 %in% c("N", "PN") ~ "HR",
+      rob_1_2 == "NI" &  rob_1_3 %in% c("Y", "PY") ~ "HR"),
+    
+    domain_2_rating_algorithm_part_1 = case_when(
+      rob_2_1 %in% c("N", "PN") & rob_2_2 %in% c("N", "PN") ~ "LR",
+      (rob_2_1 %in% c("Y", "PY", "NI") | rob_2_2 %in% c("Y", "PY", "NI")) & rob_2_3 == "N" ~  "LR",
+      (rob_2_1 %in% c("Y", "PY", "NI") | rob_2_2 %in% c("Y", "PY", "NI")) & rob_2_3 == "NI" ~ "SC",
+      (rob_2_1 %in% c("Y", "PY", "NI") | rob_2_2 %in% c("Y", "PY", "NI")) & rob_2_3 %in% c("Y", "PY")  & rob_2_4 %in% c("N", "PN") ~ "SC", 
+      (rob_2_1 %in% c("Y", "PY", "NI") | rob_2_2 %in% c("Y", "PY", "NI")) & rob_2_3 %in% c("Y", "PY")  & rob_2_4 %in% c("Y", "PY", "NI") & rob_2_5 %in% c("Y", "PY") ~ "SC",
+      (rob_2_1 %in% c("Y", "PY", "NI") | rob_2_2 %in% c("Y", "PY", "NI")) & rob_2_3 %in% c("Y", "PY")  & rob_2_4 %in% c("Y", "PY", "NI") & rob_2_5 %in% c("N", "PN", "NI")~ "HR"),
+    
+    domain_2_rating_algorithm_part_2 = case_when(
+      rob_2_6 %in% c("Y", "PY") ~ "LR",
+      rob_2_6 %in% c("N", "PN", "NI") & rob_2_7 %in% c("N", "PN") ~ "SC",
+      rob_2_6 %in% c("N", "PN", "NI") & rob_2_7 %in% c("Y", "PY", "NI") ~ "HR"),
+    
+    domain_2_rating_algorithm = case_when(
+      domain_2_rating_algorithm_part_1 == "LR" & domain_2_rating_algorithm_part_2 == "LR" ~ "LR",
+      domain_2_rating_algorithm_part_1 == "HR" | domain_2_rating_algorithm_part_2 == "HR" ~ "HR",
+      domain_2_rating_algorithm_part_1 %in% c("LR", "SC") & domain_2_rating_algorithm_part_2 %in% c("LR", "SC") ~ "SC"),
+    
+    domain_3_rating_algorithm = case_when(
+      rob_3_1 %in% c("Y", "PY")  ~ "LR",
+      rob_3_1 %in% c("N", "PN", "NI") & rob_3_2 %in% c("Y", "PY")  ~ "LR",
+      # rob_3_1 %in% c("N", "PN", "NI") & rob_3_2 %in% c("N", "PN") & rob_3_3 %in% c("N", "PN") ~ "LR",
+      rob_3_1 %in% c("N", "PN", "NI") & rob_3_2 %in% c("N", "PN", "NI", "NA") & # rob_3_3 %in% c("Y", "PY", "NI") & # 3.3 is removed
+        rob_3_4 %in% c("N", "PN") ~ "SC",
+      rob_3_1_over_cutoff == "Y" ~ "HR",
+      rob_3_1 %in% c("N", "PN", "NI") & rob_3_2 %in% c("N", "PN", "NI", "NA") & # rob_3_3 %in% c("Y", "PY", "NI") & 
+        rob_3_4 %in% c("Y", "PY", "NI") ~ "HR"), 
+    
+    domain_4_rating_algorithm_sr = case_when(
+      rob_4_3_sr %in% c("Y", "PY")  ~ "HR",
+      rob_4_3_sr == "NI"  ~ "SC",
+      rob_4_3_sr %in% c("N", "PN")  ~ "LR"),
+    
+    domain_4_rating_algorithm_cr = case_when(
+      rob_4_3_cr %in% c("Y", "PY")  ~ "HR",
+      rob_4_3_cr == "NI"  ~ "SC",
+      rob_4_3_cr %in% c("N", "PN")  ~ "LR"),
+    
+    domain_5_rating_algorithm = case_when(
+      rob_5_registered_prospective == "Y" & rob_5_2 %in% c("N", "PN") ~ "LR",
+      rob_5_registered_prospective == "Y" & rob_5_2 == "Y" ~ "HR",
+      rob_5_registered_prospective == "N" ~ "SC"),
+
+    overall_score_algorithm = case_when( 
+      domain_1_rating_algorithm == "LR" &  
+        domain_2_rating_algorithm == "LR" &  
+        domain_3_rating_algorithm == "LR" &  
+        domain_4_rating_algorithm_sr == "LR" &  
+        #domain_4_rating_algorithm_cr == "LR" |  not relevant for this study
+        domain_5_rating_algorithm == "LR" ~  "LR",
+      domain_1_rating_algorithm == "HR" |  
+        domain_2_rating_algorithm == "HR" |  
+        domain_3_rating_algorithm == "HR" |  
+        domain_4_rating_algorithm_sr == "HR" |  
+        #domain_4_rating_algorithm_cr == "HR" |  not relevant for this study 
+        domain_5_rating_algorithm == "HR" ~  "HR",
+      TRUE ~ "SC")
+  ) %>% 
+  select(
+    id_study,
+    contains("rating_algorithm"),
+    overall_score_algorithm,
+    -contains("part")
+  ) %>% 
+  mutate(rob = case_when(
+    overall_score_algorithm == "LR" ~ 0,
+    overall_score_algorithm == "SC" ~ 1,
+    overall_score_algorithm == "HR" ~ 2,
+  ))
+jitai_rob_calculated
+```
+
+<br>
+
+### Join data
+
+```{r}
+jitai_cleaned <- full_join(jitai_df_with_es, jitai_rob_calculated) %>% 
+  #rename(intervention_type = type_of_intervention_cog_exer_both_bt_pe_pa_phy_at,
+  #       control_type = control_condition_tau_wlc_injusted_intervention) %>% 
+  mutate(sample_size = case_when(
+    is.na(change_n_ig) ~ (post_n_ig + post_n_cg),
+    is.na(post_n_ig) ~ (change_n_ig + change_n_cg),
+    TRUE ~ (post_n_ig + post_n_cg)
+  ),
+  id_study = study,
+  percent_women = as.numeric(percent_women),
+  vi = se^2) 
+```
+
+## Adding Pain Disability
+
+```{r}
+jitai_pain_disability <- readxl::read_excel("data/raw/JITAI-meta-analysis-template_NUR_disability.xlsx", sheet = "Template") %>% janitor::clean_names() %>% 
+  mutate(device = device_supported_vr_smartphone_website,
+          sample = ifelse(sample == "co", "completers", sample))
+
+
+jitai_pain_disability_es <- jitai_pain_disability %>% 
+  escalc(m1i = post_m_ig, 
+         m2i = post_m_cg,
+         sd1i = ifelse(is.na(post_sd_ig), post_se_ig * sqrt(post_n_ig), post_sd_ig),
+         sd2i = ifelse(is.na(post_sd_cg), post_se_cg * sqrt(post_n_cg), post_sd_cg),
+         n1i = post_n_ig,
+         n2i = post_n_cg,
+         measure = "SMD",
+         data=.) # needs to be an escalc object first
+```
+
+## Zhang 1/ a is change 
+
+```{r}
+jitai_pain_disability_change <- jitai_pain_disability_es %>% 
+  mutate(change_sd_ig = (change_ig_ci_upper -change_ig_ci_lower)/3.92 * sqrt(change_n_ig),
+         change_sd_cg = (change_cg_ci_upper -change_cg_ci_lower)/3.92 * sqrt(change_n_ig))
+
+jitai_pd_changeES <- jitai_pain_disability_change %>% 
+  changeES()
+```
+
+```{r}
+jitai_pd_change <- jitai_pain_disability_change %>% 
+  mutate(yi = ifelse(id_study == "Zheng1, 2022", -0.7017006, yi),
+         vi = ifelse(id_study == "Zheng1, 2022", 0.3438956^2, vi),
+         id_study = ifelse(id_study == "Zheng2, 2022", "Zheng, 2022b", id_study),
+         id_study = ifelse(id_study == "Zheng1, 2022", "Zheng, 2022a", id_study),
+  )
+```
+
+
+```{r}
+jitai_pain_disability_avg <- as.data.frame(aggregate(jitai_pd_change, 
+                                    cluster = id_study, 
+                                    struct="CS" , #compound symmetric structure as nested are not indpendent
+                                    rho = .5)) %>% 
+  mutate(instrument = ifelse(outc_measure == "pi stress", "pi", outc_measure),
+         outcome_measure = "Pain Interference",
+         intervention_group = str_replace_all(cond_spec_trt1, 
+                                          pattern = c("cbt" = "CBT", "activity" = "Activity")),
+         control_group = stringr::str_to_sentence (cond_spec_trt2),
+         es = yi*-1) %>%  # reverse coded 
+  relocate(id_study, es, vi, intervention_group, control_group, outcome_measure)
+```
+
+> Wir haben immer in die Spalte „outcome measure“ die verwendeten Scores für Pain Disabiity / Pain interference dazugeschrieben. Pain disability wurde mittels RMDQ, ODI, mODI oder "pain interference" erhoben. Bei Garcia et al. wurde die "pain interference" mit 1. Activity, 2. Sleep, 3. Mood, 4. Stress erhoben. Ist es möglich von all den vier erhobenen „pain interference" Werten den Durchschnitt zu bilden? Bei Garcia et al. haben wir auch wieder nur den "standard error". 
+
+
+```{r}
+jitai_cleaned_pd <- left_join(jitai_pain_disability_avg, jitai_rob_calculated, by = "id_study") %>% 
+  #rename(intervention_type = type_of_intervention_cog_exer_both_bt_pe_pa_phy_at,
+  #       control_type = control_condition_tau_wlc_injusted_intervention) %>% 
+  mutate(sample_size =  post_n_ig + post_n_cg,
+         baseline_m_cg = as.numeric(baseline_m_cg),
+         clbp_diagnosis_cutoff = as.character(clbp_diagnosis_cutoff),
+         study_label = paste0(id_study, " - ", outcome_measure),
+         study_title = study) 
+
+jitai_cleaned_pd %>% glimpse()
+```
+
+<br>
+
+### Join Intensity, Catastrophizing, and Interference
+
+```{r}
+jitai_cleaned_pi_pc_pd <- bind_rows(jitai_cleaned, jitai_cleaned_pd) %>% relocate(id_study, study_label, es, se, yi, vi, rob) %>% drop_na(id_study)
+jitai_cleaned_pi_pc_pd 
+```
+
+## Average data
+
+### Pain Intensity
+```{r, warning=FALSE, message =FALSE}
+jitai_pi_raw <- jitai_cleaned_pi_pc_pd %>% 
+  filter(outcome_measure == "Pain Intensity") 
+
+#### Aggregate Studies with multiple ES (Özden, 2021 and Irvine 2015)
+jitai_pi_es <- jitai_pi_raw %>% #### Aggregate Studies with multiple ES (Özden, 2021 and Irvine 2015)
+  escalc(yi=es, sei=se, data=.) # needs to be an escalc object first
+
+jitai_pi_avg <- as.data.frame(aggregate(jitai_pi_es, 
+                                    cluster = study, 
+                                    struct="CS" , #compound symmetric structure as nested are not indpendent
+                                    rho = .5))  %>% 
+  mutate(control_group = case_when(
+    study == "Irvine, 2015" ~ "Active + Inactive",
+    TRUE ~ control_group
+  ))
+
+intensity <- jitai_pi_avg
+```
+
+### Pain Catastrophizing
+```{r}
+jitai_pc_raw <- jitai_cleaned_pi_pc_pd %>% 
+  filter(outcome_measure == "Pain Catastrophizing") %>% 
+  mutate(control_group = case_when(
+    study == "Irvine, 2015" ~ "Active + Inactive", # this will be aggregated in the next step
+    TRUE ~ control_group
+  ))
+
+#### Aggregate Data
+
+jitai_pc_es <- jitai_pc_raw %>% 
+  escalc(yi=es, sei=se, data=.)
+
+jitai_pc_avg <- as.data.frame(aggregate(jitai_pc_es, 
+                                  cluster = study,
+                                  struct="CS" , #compound symmetric structure as nested are not indpendent
+                                  rho = 0.5))
+
+catastrophizing <- jitai_pc_avg
+```
+
+
+```{r}
+catastrophizing %>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_styling("striped", full_width = F) %>%
+  kableExtra::scroll_box(width = "100%", height = "400px")
+```
+
+## Pain Interference
+
+```{r}
+interference <- jitai_cleaned_pd
+```
+
+## All Data
+```{r}
+jitai_data <- bind_rows(intensity, catastrophizing, interference) %>% 
+  mutate(
+  risk_of_bias = case_when(
+    overall_score_algorithm == "LR" ~ "Low",
+    overall_score_algorithm == "SC" ~ "Some concern",
+    overall_score_algorithm == "HR" ~ "High")) %>% 
+  select(id_study, es, vi, 
+         "Pain Dimension" = outcome_measure, 
+         rob, risk_of_bias,
+         intervention_group:sr_clinician,
+         outcome_type:control_type,
+         everything()) 
+```
+
+## Save data used in meta-analysis
+
+```{r}
+write_csv(jitai_data, "data/tidy/jitai_data.csv")
+```
+
+# Exploratory data analysis
+
+```{r}
+skim(jitai_data)
+```
+
+
+# Used resoures
+
+- [Formulas](https://handbook-5-1.cochrane.org/chapter_7/7_7_3_2_obtaining_standard_deviations_from_standard_errors_and.htm)
+

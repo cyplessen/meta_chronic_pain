@@ -1,0 +1,629 @@
+---
+title: "JITAI Meta-Analysis"
+author: "Constantin Yves Plessen"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    pandoc_args:
+    - +RTS
+    - "-K512m"
+    - "-RTS"
+    code_folding: show
+    highlight: pygment
+    keep_md: no
+    theme: lumen
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+subtitle: 2. Main Analyses
+editor_options:
+  chunk_output_type: console
+---
+
+
+
+```{r setup, include=FALSE}
+stack_size <- getOption("pandoc.stack.size", default = "512m")
+knitr::opts_chunk$set(echo = TRUE)
+library(weightr)
+library(RoBMA)
+library(metafor)
+library(dmetar)
+library(metaviz)
+library(meta)
+library(metapsyTools)
+library(tidyverse)
+library(robvis)
+
+# Bayesian MA
+library(brms)
+library(ggridges)
+library(tidybayes)
+library(dplyr)
+library(ggplot2)
+library(ggridges)
+library(glue)
+library(stringr)
+library(forcats)
+
+# helper function
+PET.PEESE <- function(data) {
+  mod <- list()
+  fit_PET <- lm(yi ~ sqrt(vi), 
+                weights = 1/vi, 
+                data = data)
+  
+  pet_p <- coef(summary(fit_PET))["(Intercept)", "Pr(>|t|)"] # pet p-value < .10 -> peese
+  
+  if(pet_p >= .1) {
+    mod$b <- coef(summary(fit_PET))["(Intercept)", "Estimate"] # pet estimate
+    mod$ci.lb <- confint(fit_PET)["(Intercept)", "2.5 %"] 
+    mod$ci.ub<- confint(fit_PET)["(Intercept)", "97.5 %"] 
+    mod$pval <- pet_p
+    mod$type <- "PET"
+    
+  }else{
+    
+    fit_PEESE <- lm(yi ~ vi, 
+                    weights = 1/vi, 
+                    data = data)
+    
+    mod$pval <- coef(summary(fit_PEESE))["(Intercept)", "Pr(>|t|)"] # pet p-value < .10 -> peese
+    mod$b  <- coef(summary(fit_PEESE))["(Intercept)", "Estimate"] # peese estimate
+    mod$ci.lb <- confint(fit_PEESE)["(Intercept)", "2.5 %"] 
+    mod$ci.ub <- confint(fit_PEESE)["(Intercept)", "97.5 %"] 
+    mod$type <- "PEESE"
+
+  }
+  return(mod)
+}
+
+rob_append_weights <- function(data, res){
+
+  if (!("rma" %in% class(res))) {
+    stop("Result objects need to be of class \"meta\" - output from metafor package functions")
+  }
+
+  # Extract weights
+  weights <- data.frame(id_study = names(stats::weights(res)),
+                        weight = stats::weights(res),
+                        row.names = NULL)
+
+  # Merge by Study name to create new dataframe
+  rob_df <- dplyr::left_join(data, weights, by = "id_study")
+
+  # Employ check to see if data has merged properly If a merge has failed, one
+  # of the Weight cells will be NA, meaning the sum will also be NA
+  if (is.na(sum(rob_df$weight))) {
+    stop(paste0("Problem with matching - weights do not equal 100. ",
+                "Check that the names of studies are the same in the ROB ",
+                "data and the resobject (stored in slab)"))
+  }
+
+  return(rob_df)
+}
+```
+
+# Overview of Document
+
+This document entails all analyses conducted for the JITAI meta-analysis and follows the structure of the preregistration:
+
+1. Meta-analytic methods
+
+Meta-analytic methods will be used to estimate pooled effect sizes based on the results of studies that use comparable interventions, controls and outcome measures. A random effects model will be used with standardized mean differences on the continuous outcomes described above, such as self-report measures of pain intensity. Heterogeneity will be assessed with I-squared statistics, where a value greater than 50% suggests substantial heterogeneity. 
+
+2. Publication Bias Assessment
+
+3. Sensitivity analyses
+
+Sensitivity analyses based on study quality will also be performed, along with tests of publication bias using funnel plots, Eggers Regression test, precision-effect estimate with standard errors (PET-PEESE), and p-curve analysis. 
+
+4. Analysis of subgroups or subsets 
+
+Where sufficient data are available sub-group analysis will be performed based on 
+- type of control condition
+- type of intervention
+- gender. 
+
+We initially planned to only conduct subgroup analysis if a power analysis indicates sufficient statistical power of subgroup analyses. We did not reach sufficient statistical power, we however conducted the analyses and report the results as exploratory analyses.
+
+<br>
+
+# 1. Data Cleaning
+
+## Load Data
+```{r, warning=FALSE, message =FALSE}
+jitai_data <- read_csv("data/tidy/jitai_data.csv") %>% 
+  mutate(se = sqrt(vi))
+jitai_data$control_group <- str_replace(jitai_data$control_group, " Control", "")
+jitai_data$intervention_group <- str_replace(jitai_data$intervention_group, "Activity", "Exercise")
+
+intensity <- jitai_data %>% 
+  filter(`Pain Dimension` == "Pain Intensity") 
+
+catastrophizing <- jitai_data %>% 
+  filter(`Pain Dimension` == "Pain Catastrophizing") 
+
+interference <- jitai_data %>% 
+  filter(`Pain Dimension` == "Pain Interference") 
+```
+
+
+# 2. All Pain Domains
+
+Here are analyses including all Pain Domains: Pain Intensity, Pain Catastrophizing, and Pain Disability/Interference
+
+## Main Analysis
+```{r}
+pi_pc_pd_result <- meta::metagen(data = jitai_data,
+                              TE = es, 
+                              seTE = sqrt(vi), 
+                              subgroup = `Pain Dimension`,
+                              studlab = id_study,
+                              sm = "g", 
+                              hakn = TRUE, 
+                              method.tau = "REML", 
+                              prediction = TRUE, 
+                              random = TRUE,
+                              common = FALSE)
+
+pi_pc_pd_result
+```
+
+## Analyses with other R packages
+
+```{r}
+pi_pc_pd_metapsytools <- runMetaAnalysis(jitai_data,
+                method.tau = "REML",
+                hakn = TRUE,
+               # study.var = "id_study", # brakes subgroup analyses for 3lvl models
+                extra.grouping.var = NULL,
+                arm.var.1 = "intervention_group",
+                arm.var.2 = "control_group",
+                measure.var = "outcome_measure",
+                es.var = "es",
+                se.var = "se",
+                low.rob.filter = "rob < 1",
+                method.tau.ci = "Q-Profile",
+                round.digits = 2,
+                which.outliers = "combined",
+                which.influence = "combined",
+                which.rob = "combined",
+                nnt.cer = 0.2,
+                rho.within.study = 0.5,
+                use.rve = TRUE,
+                html = TRUE)
+
+pi_pc_pd_metafor <- rma( data = jitai_data,
+                         yi = es, 
+                         vi = vi, 
+                         slab = id_study,
+                         method = "REML", 
+                         test = "knha") 
+
+```
+
+
+<br>
+
+## Plots
+
+### Forest Plot
+```{r height = 13}
+meta::forest(pi_pc_pd_result,
+             subgroup = TRUE,
+             weigth = TRUE,
+            # layout = "JAMA",
+            leftcols = c("id_study", "intervention_group", "control_group", "risk_of_bias"),
+            leftlabs = c("Author", "Intervention", "Control", "Risk of Bias"))
+```
+
+Saving plot
+```{r}
+pdf(file = "figures/pi_pc_pd_forest.pdf",    # The directory you want to save the file in
+    width = 13, # The width of the plot in inches
+    height = 10) # The height of the plot in inches
+
+meta::forest(pi_pc_pd_result,
+             subgroup = TRUE,
+             weigth = TRUE,
+            # layout = "JAMA",
+            leftcols = c("id_study", "intervention_group", "control_group", "risk_of_bias"),
+            leftlabs = c("Author", "Intervention", "Control", "Risk of Bias"))
+
+dev.off()
+```
+
+<br>
+
+### Funnel Plot
+
+```{r}
+pi_metafor <- rma(data = intensity,
+                  yi = es, 
+                  vi = vi, 
+                  slab = id_study,
+                  method = "REML", 
+                  test = "knha") 
+
+pc_metafor <- rma(data = catastrophizing,
+                  yi = es, 
+                  vi = vi, 
+                  slab = id_study,
+                  method = "REML", 
+                  test = "knha")  
+
+pd_metafor <- rma(data = interference,
+                  yi = es, 
+                  vi = vi, 
+                  slab = id_study,
+                  method = "REML", 
+                  test = "knha") 
+
+funnel(pi_metafor, main="Pain Intensity")
+funnel(pc_metafor, main="Pain Catastrophizing")
+funnel(pd_metafor, main="Pain Interference")
+```
+
+
+Saving Plots
+```{r}
+pdf(file = "figures/pi_pc_pd_funnel.pdf",    # The directory you want to save the file in
+    width = 5, # The width of the plot in inches
+    height = 8) # The height of the plot in inches
+
+### set up 2x2 array for plotting
+par(mfrow=c(3,1))
+ 
+### draw funnel plots
+funnel(pi_metafor, main="Pain Intensity")
+funnel(pc_metafor, main="Pain Catastrophizing")
+funnel(pd_metafor, main="Pain Interference")
+dev.off()
+```
+
+#### Contour Enhanced Funnel Plot
+```{r}
+### draw funnel plots
+funnel(pi_metafor, main="Pain Interference", 
+       level=c(90, 95, 99), shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+
+funnel(pc_metafor, main="Pain Catastrophizing", level=c(90, 95, 99), 
+       shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+
+funnel(pd_metafor, main="Pain Interference", level=c(90, 95, 99), 
+       shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+```
+
+
+```{r}
+pdf(file = "figures/pi_pc_pd_funnel_contour.pdf",    # The directory you want to save the file in
+    width = 8, # The width of the plot in inches
+    height = 8) # The height of the plot in inches
+
+par(mfrow=c(3,1))
+ 
+### draw funnel plots
+funnel(pi_metafor, main="Pain Interference", 
+       level=c(90, 95, 99), shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+
+funnel(pc_metafor, main="Pain Catastrophizing", level=c(90, 95, 99), 
+       shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+
+funnel(pd_metafor, main="Pain Interference", level=c(90, 95, 99), 
+       shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+dev.off()
+```
+
+#### With Trim-and-Fill Method
+```{r}
+taf.pi <- trimfill(pi_metafor)
+taf.pc <- trimfill(pc_metafor)
+taf.pd <- trimfill(pd_metafor)
+
+funnel(taf.pi, main="Pain Interference", 
+       level=c(90, 95, 99), shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+
+funnel(taf.pc, main="Pain Catastrophizing", level=c(90, 95, 99), 
+       shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+
+funnel(taf.pd, main="Pain Interference", level=c(90, 95, 99), 
+       shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+```
+
+Saving Plots
+```{r}
+pdf(file = "figures/pi_pc_pd_funnel_taf.pdf",    # The directory you want to save the file in
+    width = 8, # The width of the plot in inches
+    height = 8) # The height of the plot in inches
+
+par(mfrow=c(3,1))
+ 
+### draw funnel plots
+funnel(taf.pi, main="Pain Interference", 
+       level=c(90, 95, 99), shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+
+funnel(taf.pc, main="Pain Catastrophizing", level=c(90, 95, 99), 
+       shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+
+funnel(taf.pd, main="Pain Interference", level=c(90, 95, 99), 
+       shade=c("white", "gray55", "gray75"), 
+       refline=0, 
+       legend=TRUE)
+dev.off()
+```
+
+### *p*-Curve
+
+```{r, error=TRUE}
+jitai_data %>% 
+  select(TE = es,
+         seTE = se,
+         studlab = id_study) %>% 
+pcurve(.)
+```
+
+
+## Tables
+
+### Study Overview
+
+```{r, warning=FALSE, message =FALSE, results='asis'}
+createStudyTable(jitai_data,
+                 ## COLUMNS --------------------------------------
+                 # Simply add columns in the order in which
+                 # they should appear in the table
+                 id_study, 
+                 `Pain Dimension`,
+                 intervention_group,
+                 control_group,
+                 country, 
+                 mean_age, 
+                 percent_women,
+                 format, 
+                 app_compatible_y_n, 
+                 # device_supported_virtual_app_web,
+                 overall_score_algorithm,
+                 #rob2_1_randomization,
+                 #rob2_2_deviations,
+                 #rob2_3_missing,
+                 #rob2_4_measurement,
+                 #rob2_5_selection,
+                 duration_of_intervention,
+                 post_n_ig,
+                 post_n_cg,
+                 
+             #    # You can directly recode values within a variable
+             #    arm_format_trt1 = c("CBT" = "cbt", 
+             #                        "PST" = "pst",
+             #                        "BA" = "bat"),
+             #    arm_format_trt2 = c("Wait-List" = "wl", 
+             #                        "Care-As-Usual" = "cau"),
+             #    n_sessions_trt1, Post_N_trt1, Post_N_trt2, 
+             #    country = c("Europe" = "3", "USA" = "1",
+             #                "Asia" = "6", "Middle East" = "7", 
+             #                "Australia" = "5"),
+             #    sg, ac, ba, itt,
+             #    
+             #    
+             #    ## SPECIFICATIONS -------------------------------
+             #    # .round.by.digits controls the number of rounded digits for
+             #    # specified columns
+             #    .round.by.digits = list(mean_age_trt1 = 0, 
+             #                            Post_N_trt1 = 0,
+             #                            Post_N_trt2 = 0),
+                 
+                 # .column.names allows to rename columns
+                 .column.names = list(id_study = "Study",
+                                      country = "Country",
+                                      mean_age = "Mean age",
+                                      percent_women = "% female",
+                                      intervention_group = "Intervention",
+                                      control_group = "Control",
+                                      duration_of_intervention = "Duration",
+                                      format = "Format",
+                                      app_compatible_y_n = "App Compatibility",
+                                      device = "Device",
+                                      n_sessions_trt1 = "Sessions",
+                                      overall_score_algorithm = "Risk of Bias",
+                                      post_n_ig = "N Intervention", 
+                                      post_n_cg = "N Control"))
+
+```
+
+### Effect Sizes
+```{r, warning=FALSE, message =FALSE, results='asis'}
+pi_pc_pd_metapsytools
+```
+
+### Publication Bias Estimates
+
+Trim-and-fill method, limit meta-analysis, selection model correct for publication bias as described here: 
+
+```{r, warning=FALSE, message =FALSE, results='asis'}
+metapsyTools::correctPublicationBias(pi_pc_pd_metapsytools,
+                                     selmodel.steps = .025)
+
+correctPublicationBias(pi_pc_pd_metapsytools) %>% plot("selection")
+```
+
+#### Additional Correction for Publication Bias: PET-PEESE
+
+```{r}
+all_pet_peese <- PET.PEESE(jitai_data)
+
+all_pet_peese
+```
+
+PET-PEESE adjusts for the relationship between effect sizes and standard errors. If the test for the effect size with PET is not significant at $\alpha = .10$, we interpret the PET model. However, if the test for effect size were significant, we fit and interpret the PEESE model. Using `r all_pet_peese$type`, the corrected estimate is `r all_pet_peese$b`, 95% CI [`r all_pet_peese$ci.lb`, `r all_pet_peese$ci.ub`], *p* = `r round(all_pet_peese$pval, 3)`.
+
+<br>
+
+### Robust Bayesian MA
+
+
+```{r}
+
+jitai_data <- jitai_data %>% 
+  mutate(sample_size = case_when(
+   !is.na(post_n_cg) ~ post_n_cg + post_n_ig,
+   id_study == "Zheng, 2022a" ~ 37))
+
+fit_RoBMA <- RoBMA(d = jitai_data$es, 
+                   n = jitai_data$sample_size, 
+                   seed = 1, 
+                   model = "PSMA", 
+                   parallel = TRUE)
+
+summary(fit_RoBMA)
+
+interpret(fit_RoBMA, output_scale = "cohens_d")
+```
+
+
+## Subgroup analyses
+
+We conducted subgroup analyses for:  
+- intervention group  
+- control group  
+- sample  
+- format  
+- overall_score_algorithm  
+
+### Control Condition
+
+```{r, warning=FALSE, message =FALSE, results='asis'}
+pi_pc_pd_control <- subgroupAnalysis(pi_pc_pd_metapsytools, 
+                               .which.run = "combined",
+                               control_group) #after package update not working
+pi_pc_pd_control
+```
+
+### Intervention
+```{r, warning=FALSE, message =FALSE, results='asis'}
+pi_pc_pd_intervention <- subgroupAnalysis(pi_pc_pd_metapsytools, 
+                                    intervention_group,
+                                    .which.run = "combined",
+                                    .tau.common = TRUE)
+pi_pc_pd_intervention
+```
+
+### Sample
+```{r, warning=FALSE, message =FALSE, results='asis'}
+pi_pc_pd_sample <- subgroupAnalysis(pi_pc_pd_metapsytools, 
+                              sample,
+                              .which.run = "combined",
+                              .tau.common = TRUE)
+pi_pc_pd_sample
+```
+
+### Format
+```{r, warning=FALSE, message =FALSE, results='asis'}
+pi_pc_pd_format <- subgroupAnalysis(pi_pc_pd_metapsytools, 
+                              format,
+                              .which.run = "combined",
+                              .tau.common = TRUE)
+pi_pc_pd_format
+```
+
+### Device
+```{r, warning=FALSE, message =FALSE, results='asis'}
+pi_pc_pd_device <- subgroupAnalysis(pi_pc_pd_metapsytools, 
+                             device,
+                             .which.run = "combined",
+                             .tau.common = TRUE)
+pi_pc_pd_device
+```
+
+### Risk of Bias
+```{r, warning=FALSE, message =FALSE, results='asis'}
+pi_pc_pd_rob <- subgroupAnalysis(pi_pc_pd_metapsytools, 
+                           overall_score_algorithm,
+                           .which.run = "combined",
+                           .tau.common = TRUE)
+pi_pc_pd_rob
+```
+
+
+<br>
+
+# 3. Risk of Bias: Trafic Light Plot
+```{r}
+data_rob <- intensity %>% 
+ # separate(study, c("author", "year"), sep = ",") %>% 
+  select(id_study,
+         D1 = domain_1_rating_algorithm,
+         D2 = domain_2_rating_algorithm, 
+         D3 = domain_3_rating_algorithm, 
+         D4 = domain_4_rating_algorithm_sr,
+         D5 = domain_5_rating_algorithm, 
+         Overall = overall_score_algorithm
+  ) %>% 
+  mutate_at(vars(2:7),
+  ~recode(.,
+    "LR"= "Low", 
+    "SC"= "Some concerns",
+    "HR"= "High")) %>% 
+  group_by(id_study) %>% 
+  slice(1)
+
+rob_traffic_light(data_rob,
+            tool = "ROB2",
+            psize = 15)
+```
+
+### Weighted ROB Plot
+
+```{r}
+pi_rob <- rob_append_weights(data_rob, pi_metafor)
+
+rob_summary(pi_rob,
+            tool = "ROB2")
+```
+
+<br>
+
+# 4. Automated Reporting with metafor
+
+Cannot be knitted within an RMD file, needs to be executed as a chunk.
+
+This is used for citation purposes.
+```{r}
+#reporter(pi_pc_pd_metafor, dir = "/Users/cyp/Documents/projects #/work/current/project-4-jitai/2-github/jitai/reporter")
+#
+#reporter(pi_metafor, dir = "/Users/cyp/Documents/projects /work/current/project-4-jitai/2-github/jitai/reporter")
+#
+#reporter(pc_metafor, dir = "/Users/cyp/Documents/projects /work/current/project-4-jitai/2-github/jitai/reporter")
+#
+#reporter(pd_metafor, dir = "/Users/cyp/Documents/projects /work/current/project-4-jitai/2-github/jitai/reporter")
+```
+
+<br>
